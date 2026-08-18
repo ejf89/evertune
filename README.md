@@ -22,3 +22,208 @@ We're less interested in a "completed checklist" and more interested in what you
 - Anything you discovered about this model — quirks, failure modes, parameters that mattered, things that surprised you compared to other LLMs you've used.
 - Decisions you made and the tradeoffs behind them. If you tried something that didn't work, that's worth including too.
 - What you'd want to do next if this were going to production, and what you'd want to know before getting there.
+
+---
+
+# Results: what we built and found
+
+**For a non-technical summary** — what was built and what we found, in plain
+language with diagrams, no code — see **[the report site](https://ejf89.github.io/evertune/)**.
+The section below is the technical version, for engineering review.
+
+This section is a self-contained digest of the whole submission — everything
+below traces to a committed file and re-derives from raw data, nothing is
+asserted without a source. For the full depth behind any of it:
+
+- **[`PLAN.md`](PLAN.md)** — every design decision, the alternatives considered
+  and rejected, and a chronological log of two follow-up audit rounds run
+  after the first pass was "done."
+- **[`FINDINGS.md`](FINDINGS.md)** — the complete write-up this section
+  summarizes, with full data tables and caveats.
+- **[`NOTES.md`](NOTES.md)** — analysis of the starting repo before any
+  Gemini work began.
+- **`loadtest/results/*.jsonl`** — the raw per-request data behind every
+  number below. Run `python -m loadtest.analyze` to regenerate every chart
+  and printed summary from it yourself.
+
+**Quick facts:** `GeminiVertex` provider (`llm/gemini_vertex.py`) · 37 unit
+tests passing, `pyflakes` clean · 6 load/eval experiments · 2 follow-up audit
+rounds after the initial submission · every chart below regenerable from
+committed data, zero illustrative numbers.
+
+## The provider, in one paragraph
+
+`GeminiVertex` implements the existing `LLM` interface against Gemini 2.5
+Flash on Vertex AI, using ADC auth (`gcloud auth application-default login`)
+rather than the bearer-API-key pattern the existing `Together` provider
+uses — Vertex has no equivalent of a static key. `LLM.SimpleResponse` was
+extended with optional `finish_reason`, `model`, `latency_ms`, and
+`thinking_tokens` fields (backward compatible — `Together`'s construction
+call is unaffected). Every design decision (why extend rather than replace
+the response type, why SDK-native retry over hand-rolled backoff, why
+`thinking_budget` is constructor config rather than a per-call param) is in
+`PLAN.md` with the rejected alternative and the reason it lost.
+
+## Answering the four things you asked for
+
+Your own deliverables list, verbatim, each followed directly by the answer —
+so nothing here requires cross-referencing another file to find.
+
+### "How the integration behaves under realistic load. Pick a workload, run it, and tell us what you observed."
+
+**The workload:** 12 category-style questions where a brand could plausibly
+appear — *"best running shoes for marathon training," "top project
+management tools for a small team,"* and 10 more like them — because your
+product measures whether a brand shows up in an answer, not just whether
+the API responds. A generic "say hi" load-test prompt would exercise the
+plumbing but tell us nothing about the thing you actually care about.
+
+**What we observed:** zero HTTP errors from 1 through **2,000 concurrent
+requests** (~7,400 total across all load experiments) — but that's not the
+same as "no ceiling." Latency is flat only up to ~150–250 concurrent; past
+that, p50 grows almost perfectly linearly (**r² = 0.99**), from ~7s up to
+**87 seconds at 2,000 concurrent**:
+
+![Latency vs. concurrency, full range](loadtest/results/charts/concurrency_latency_full_range.png)
+
+| Concurrency | Errors | p50 |
+|---:|---:|---:|
+| 1–150 | 0 | ~5.5–8.2s (flat) |
+| 250 | 0 | 12.1s |
+| 600 | 0 | 23.7s |
+| 1,200 | 0 | 47.2s |
+| 2,000 | 0 | 87.4s |
+
+The system never fails loudly — it just queues, implying roughly **1,400
+requests/minute** of sustained effective throughput before things back up.
+A caller with a timeout would see what looks like an outage well before any
+error ever appears, and it means retry-based backpressure structurally
+can't help here (retries key off error codes; this failure mode produces
+none).
+
+**Follow-up: is that wall real, or one process's own bottleneck?** All of
+the above came from one Python process on one machine, so we ran it again
+from **three independent processes simultaneously** (separate event loops,
+connection pools, same total load). Result was genuinely mixed, not a
+clean answer: each process's latency tracked *its own* load level, not the
+combined total (evidence the queueing is per-process) — but one of the
+three also hit our **first-ever real HTTP error in this whole project**, a
+`429`, something a single process never triggered even at 2,000
+concurrent (evidence a real shared rate limit does exist and is
+reachable). Both are true at once. Confirming which effect dominates
+needs genuinely independent machines, not just independent processes on
+this one — see "next steps" below. We also confirmed from SDK source
+(not inferred) that client-side timeouts are **never retried** by the SDK
+on the async code path this provider uses — a real, resolved gap, not an
+open question anymore.
+
+We also tested a *sudden* spike vs. a gradual ramp (two idle→spike cycles
+at the measured ceiling) — no meaningful cold-vs-warm difference.
+
+### "Anything you discovered about this model — quirks, failure modes, parameters that mattered, things that surprised you compared to other LLMs you've used."
+
+**Thinking tokens dominate cost, and can bill you for an empty answer.**
+Gemini 2.5 Flash spends hidden "thinking" tokens before its visible
+answer — billed, but never shown in the response text.
+
+**Read the table below carefully — it invites a wrong assumption.** It's
+tempting to see "avg output tokens" climb with the thinking-budget setting
+and conclude more thinking buys a bigger or better answer. It doesn't:
+thinking is reasoning that happens *before* writing what you see, not the
+model doing more work *on* the visible answer. At `high`, the visible
+answer was actually slightly *shorter* (146 tokens) than at `default`
+(177), even as thinking cost kept climbing — the "avg output tokens"
+column below is visible-plus-thinking combined, and thinking is doing
+nearly all of that climbing, not the part you'd actually read. We only
+measured quantity here (tokens, latency, cost), not answer accuracy — so
+the case for leaving thinking on has to rest on quality grounds nobody's
+tested yet, not on "more thinking = better output," which this data
+contradicts.
+
+![Token spend by thinking-budget setting](loadtest/results/charts/thinking_budget_tokens.png)
+
+At default settings, thinking was **3.4× the visible output** (596 vs. 177
+tokens) — **9.4× the dollar cost** of disabling it, verified against
+Google's live Vertex pricing (thinking is billed at the *same* rate as
+visible output):
+
+| Thinking budget | Avg output tokens (visible+thinking) | $ / 1,000 requests |
+|---|---:|---:|
+| disabled | 81 | $0.207 |
+| low | 245 | $0.617 |
+| default | 773 | $1.938 |
+| high | 880 | $2.205 |
+
+Pushed further: constraining `max_output_tokens` while thinking is active
+produced **`HTTP 200` responses with an empty answer in 9 of 12 requests** —
+billed in full, no exception raised. The *original* `SimpleResponse` had no
+field able to even express that outcome; a mention-rate pipeline that
+doesn't check `finish_reason` would silently undercount every category
+where this triggers.
+
+**`temperature=0` is not fully deterministic.** 100 identical calls, same
+prompt, `temperature=0`: **7 distinct answer strings**, not 1:
+
+![Brand mention rate by temperature](loadtest/results/charts/output_variance_mentions.png)
+
+Variance isn't uniform across brands — five brands held 85–98% mention
+rates regardless of temperature, while two sat right on the model's
+inclusion/exclusion boundary (4% and 56% across temperatures). A single
+sample at `temperature=0` is not a clean-room-reproducible number, and
+which brands need more samples can't be known without a variance check per
+category.
+
+**What surprised us most relative to other LLMs:** the invisible,
+billed-but-not-returned thinking spend has no analogue in `Together` or any
+OpenAI-shaped provider — it's not just a bigger number, it's a category of
+spend the *original* response object literally couldn't represent.
+
+### "Decisions you made and the tradeoffs behind them. If you tried something that didn't work, that's worth including too."
+
+- **Extended `SimpleResponse` with optional fields** (`finish_reason`,
+  `model`, `latency_ms`, `thinking_tokens`) rather than implementing
+  strictly to the old 3-field shape (would've silently dropped
+  `finish_reason` and undercounted cost) or inventing a new response type
+  (would've fractured any code treating providers polymorphically).
+  Backward compatible — `Together`'s construction call is unaffected.
+- **ADC auth (`gcloud auth application-default login`), not an API key** —
+  Vertex has no bearer-token equivalent; identity comes from a refreshing
+  credential tied to a GCP project, not a portable secret.
+- **`thinking_budget` as constructor config, not a per-call param** — keeps
+  the shared `ask_generic_question` signature from accreting every vendor's
+  knobs. **Tradeoff, not hidden:** this makes thinking budget per-*instance*,
+  not per-*prompt* — cheap thinking for simple questions and expensive
+  thinking for hard ones isn't supported without revisiting this design.
+- **The SDK's own retry defaults instead of hand-rolled backoff** —
+  verified from source that it defaults to zero retries unless configured.
+  **What we later learned this cost us:** the retry-amplification question
+  this was meant to eventually answer turned out unanswerable by an
+  attempts-on-vs-off test at all, because this system's real failure mode
+  under load is queueing delay, not HTTP errors — see the load-behavior
+  answer above. Not a wrong decision, but a limit on what it let us learn.
+- **What didn't work / turned out wrong, included rather than hidden:** the
+  original reasoning for stopping our concurrency sweep at 150 was "shared
+  GCP quota with other candidates' forks." Checking the project's actual
+  quota settings showed `gemini-2.5-flash` runs on Google's **Dynamic
+  Shared Quota** — no small fixed allocation to protect — so that reasoning
+  was wrong. We corrected it, escalated further with sign-off, and that's
+  what actually produced the load finding above.
+
+### "What you'd want to do next if this were going to production, and what you'd want to know before getting there."
+
+- **Reproduce the multi-process test from genuinely independent machines,
+  not just independent processes on one machine** — now the single
+  highest-value open item (narrowed, not newly discovered: we already ran
+  the same-machine version — see above). If the per-process latency
+  pattern holds from truly separate networks, it points to a real
+  per-client-ish Vertex/DSQ-side effect to design around (client-side
+  concurrency limiting, or Google's Provisioned Throughput); if it
+  doesn't, more of the effect is on our side than we think.
+- **A `finish_reason`-aware guard** in front of any mention-rate pipeline —
+  the empty-response failure mode is silent and reproducible.
+- A decision on whether `temperature=0` is trustworthy as a single
+  ground-truth call for Evertune's methodology, given it isn't fully
+  deterministic.
+
+Full list, plus everything explicitly *not* run and why (a sustained soak
+test, prompt-length variation), in `FINDINGS.md`.
