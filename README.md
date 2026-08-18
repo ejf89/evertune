@@ -124,7 +124,21 @@ at the measured ceiling) — no meaningful cold-vs-warm difference.
 
 **Thinking tokens dominate cost, and can bill you for an empty answer.**
 Gemini 2.5 Flash spends hidden "thinking" tokens before its visible
-answer — billed, but never shown in the response text:
+answer — billed, but never shown in the response text.
+
+**Read the table below carefully — it invites a wrong assumption.** It's
+tempting to see "avg output tokens" climb with the thinking-budget setting
+and conclude more thinking buys a bigger or better answer. It doesn't:
+thinking is reasoning that happens *before* writing what you see, not the
+model doing more work *on* the visible answer. At `high`, the visible
+answer was actually slightly *shorter* (146 tokens) than at `default`
+(177), even as thinking cost kept climbing — the "avg output tokens"
+column below is visible-plus-thinking combined, and thinking is doing
+nearly all of that climbing, not the part you'd actually read. We only
+measured quantity here (tokens, latency, cost), not answer accuracy — so
+the case for leaving thinking on has to rest on quality grounds nobody's
+tested yet, not on "more thinking = better output," which this data
+contradicts.
 
 ![Token spend by thinking-budget setting](loadtest/results/charts/thinking_budget_tokens.png)
 
