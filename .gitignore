@@ -1,3 +1,6 @@
+# Personal working log — not a deliverable, see EXECUTION.md itself
+EXECUTION.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
