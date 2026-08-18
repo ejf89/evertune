@@ -44,15 +44,27 @@ document is the results, not a repeat of the reasoning.
   concurrent, then grows **almost perfectly linearly** from there to 2,000
   (r²=0.99) — p50 goes from ~7s to **87 seconds**. Nothing ever fails; it
   just queues, and the queue gets a lot longer than "no ceiling found" would
-  have implied. See "Escalation past 150" below for the numbers and an
-  important caveat about whether this reflects Google's real limit or our
-  own single test process.
+  have implied. See "Escalation past 150" below for the numbers.
+- **A follow-up multi-process test found the picture is mixed, not
+  one-sided: the latency curve looks per-process, but a real shared rate
+  limit does exist.** Three independent processes hammering Vertex
+  simultaneously each saw latency matching *their own* load level, not the
+  combined total — but one of them also hit our first-ever HTTP error in
+  this entire project (a `429`), something a single process never
+  triggered even at 2,000 concurrent. Both things are true at once — see
+  "Is the latency wall real, or one process's own bottleneck?" below.
 - **Retry amplification remains untestable by this method — for a specific,
   now-understood reason, not just bad luck.** The SDK's retries only fire on
   HTTP error codes (429/5xx/timeout). This system's failure mode under load
   isn't errors, it's queueing delay — so no amount of pushing concurrency
   higher was ever going to make retries engage. This is a structural finding
   about *how* this API degrades, not an unresolved gap in our testing.
+- **Confirmed from source, not inferred: client-side timeouts are never
+  retried on this SDK's async path either.** The retry predicate is
+  `httpx`-specific; this provider's real path goes through `aiohttp`, and
+  tracing the SDK's own exception handling shows a timeout propagates
+  uncaught, with zero retries. A production caller needs its own
+  timeout/backoff handling — the SDK's defaults won't provide it here.
 - **A cold burst (idle → sudden spike) didn't look meaningfully different
   from a warm one** at the same concurrency level — see the burst test
   below.
@@ -325,6 +337,104 @@ how this system actually degrades. That's a real, useful finding in its
 own right (see "Escalation past 150"), even though it closes this specific
 experiment out as a structural non-result rather than a data-driven one.
 
+### Client-side timeouts are never retried on this SDK's async path — confirmed from source
+
+**2026-08-18 follow-up.** The retry-amplification result above answers "does
+retrying help under quota pressure" (no observable answer — nothing errors).
+A related but different question was left open in an earlier pass: if a
+*caller* sets its own timeout (which any real production caller would),
+does the SDK at least retry *that*? Reading the retry predicate alone
+wasn't enough to answer it — the predicate matches `httpx.TimeoutException`,
+but this provider's actual async path goes through `aiohttp`, not httpx.
+
+Traced further this pass: the SDK's internal `_async_request_once` (the
+function `tenacity`'s retry decorator actually wraps) has its own inline
+`except` clause around the aiohttp request call — but it only catches
+`aiohttp.ClientConnectorError`, `ClientConnectorDNSError`, `ClientOSError`,
+`ServerDisconnectedError`, and `auth_exceptions.TransportError`.
+**`asyncio.TimeoutError` — what aiohttp raises when a `ClientTimeout`
+expires — is not in that list, and it isn't `httpx.TimeoutException`
+either.** It propagates straight out of the SDK, past both the inline
+handler and the outer `tenacity` retry, uncaught.
+
+**Confirmed, not inferred: on the async path this provider uses, the SDK's
+built-in retry logic does not retry client-side timeouts at all.** A
+caller relying on `retry_attempts=N` to smooth over its own timeouts under
+load (the scenario the original retry-amplification design was trying to
+probe) gets zero retries from the SDK on that failure mode — every one
+propagates as an uncaught exception. `loadtest/runner.py`'s own
+`classify_error` correctly tags these `timeout` in the harness's data, but
+that's this repo's classification, not SDK-level retry behavior. Evertune
+needs to handle timeout-triggered retry/backoff itself if it wants that
+behavior — the SDK's defaults will not provide it on this code path.
+
+### Is the latency wall real, or one process's own bottleneck? Multi-process follow-up
+
+**2026-08-18 follow-up**, in direct response to the caveat above. Ran the
+exact same per-process load (concurrency=700, 720 requests) from **three
+independent Docker containers simultaneously** — separate OS processes,
+separate Python interpreters, separate `asyncio` event loops, separate
+`aiohttp` sessions/connection pools, launched at the same time from the
+host:
+
+| Process | Requests | Errors | p50 | p95 |
+|---|---:|---:|---:|---:|
+| a | 720 | 0 | 30,341 ms | 49,663 ms |
+| b | 720 | 1 (`rate_limited`) | 28,217 ms | 49,959 ms |
+| c | 720 | 0 | 29,475 ms | 49,261 ms |
+
+For comparison: a **lone** process running 700 concurrent (per the
+single-process escalation fit, `p50 ≈ 42ms × concurrency − 665ms`) would
+predict **~28.7s**. A lone process running the **combined** ~2,100
+concurrent (three processes' worth at once) would predict **~87.5s** — the
+same ballpark as the single-process 2,000-concurrent result already found.
+
+**The result is genuinely mixed, not a clean answer either way — and that's
+more informative than a clean answer would have been:**
+
+1. **Latency tracked each process's *own* level (700), not the combined
+   total (~2,100).** All three processes landed at p50 ≈ 28–30 seconds —
+   matching the "lone process at 700" prediction almost exactly, nowhere
+   near the "lone process at 2,100" prediction of ~87s. Three independent
+   processes hammering Vertex at the same time did **not** produce the
+   latency a single process would see carrying that same combined load.
+   That's evidence the queueing/latency-wall effect is substantially
+   **per-process** (or at least per-connection-source) rather than one
+   global shared queue that treats every caller identically regardless of
+   origin.
+2. **But process b hit our first-ever real HTTP error in this entire
+   project.** Every single-process test we ran — including the escalation
+   to 2,000 concurrent — produced zero errors across roughly 9,000
+   requests. The moment three independent processes pushed *combined*
+   demand past what any one of them had individually reached, we got one
+   `429 rate_limited`. That's a real, if singular, signal that a genuine
+   shared server-side (or regional) rate limit does exist and can trigger
+   — it just takes aggregate demand across multiple independent sources to
+   reach it, not one process's demand alone.
+
+**Read together: this looks like two different mechanisms, not one.**
+Something that behaves per-process governs the latency/queueing curve
+(consistent with a per-connection-source effect — possibly something in
+how Vertex or the regional load balancer treats each client, possibly
+still something about this one machine's networking that we can't fully
+rule out even now); and separately, a real shared quota/rate-limit ceiling
+exists above that, which only aggregate multi-source demand reached. A
+single clean "it's client-side" or "it's server-side" verdict would have
+been *less* accurate than this — the honest result is that both are real.
+
+**Still not a full resolution — stated plainly, not glossed over.** All
+three processes still shared this one Mac's network interface and Docker
+Desktop's virtualized networking layer, so "per-process" here could still
+mean "per-something-about-this-one-machine" rather than genuinely
+per-client from Vertex's perspective — we can't fully separate those two
+from a single machine, however many processes run on it. What this
+experiment *did* newly establish, and couldn't have without running
+multiple processes: a real server-side rate limit exists and is
+reachable (the 429), which a single process never once triggered even at
+2,000 concurrent. A genuinely independent machine on a genuinely
+independent network is still the only way to fully settle the per-process
+latency question — see "What we'd want before production."
+
 ## What we didn't run
 
 Per `PLAN.md`'s experiment tiering, burst testing, cost modeling, and
@@ -389,48 +499,31 @@ This is a stated scope cut, not a silent one.
 
 ## What we'd want before production
 
-- **Confirmation that the ~1,400 req/min latency wall is real, not a
-  test-harness artifact.** This is now the single most important open item.
-  Reproduce the escalation from at least 2-3 independent processes (ideally
-  independent machines) hitting Vertex simultaneously. If the wall holds
-  regardless of which process is generating the load, it's a genuine
-  Vertex-side (or regional/DSQ-pool) soft limit and Evertune needs to design
-  around it — client-side concurrency limiting, request queuing with
-  timeouts, or Provisioned Throughput (Google's paid option for guaranteed
-  capacity instead of the shared DSQ pool) if `~1,400 req/min` isn't enough
-  headroom for their real traffic. If it *doesn't* hold — if a second
-  process sees its own flat-then-linear curve independently — the limit is
-  closer to us than to Google, and the fix is entirely different (don't run
-  the caller as one single-process/single-machine client).
+- **Reproduce the multi-process test from genuinely independent machines,
+  not just independent processes on one machine.** We already ran the
+  cheap version of this (three simultaneous Docker containers, one Mac —
+  see "Is the latency wall real, or one process's own bottleneck?") and it
+  meaningfully narrowed the question rather than leaving it fully open:
+  the latency curve looks per-process, and a real shared `429` rate limit
+  was newly confirmed to exist above single-process levels. What it still
+  can't separate: "per-process" vs. "per-this-one-machine's-network-path."
+  That narrower question needs true independent machines/networks —
+  ideally including Provisioned Throughput as a comparison point, since
+  Google's paid guaranteed-capacity option should behave differently from
+  the shared DSQ pool if the limit really is DSQ-side.
 - **`parallelism()`'s 150 default reconsidered in light of the above**: 150
   is still the highest level we confirmed flat, but the code comment should
   say plainly that concurrency in the 250+ range doesn't fail, it queues —
   a caller relying on `parallelism()` as "the safe number" should know
   what's actually on the other side of it now, not just that we stopped
   measuring there.
-- **A latency-aware (not just error-aware) production guard, and a real
-  answer on whether the SDK's retries even engage on a client-side
-  timeout.** The original retry-amplification framing assumed the risk
-  under load was errors compounding via retries. The real risk this data
-  points to is different: a caller with a fixed timeout, calling at high
-  concurrency, would see a wall of client-side *timeouts* (not 429s) once
-  past ~150-250 concurrent — and whether that then triggers the SDK's
-  retry logic is genuinely unresolved, not confirmed either way. Reading
-  the SDK source: the retry predicate matches `httpx.TimeoutException`/
-  `httpx.ConnectError` specifically, but the actual async path this
-  provider uses (`client.aio.models.generate_content`) goes through an
-  `aiohttp` session, not httpx — whether aiohttp's own timeout/connection
-  exceptions are caught by that same predicate wasn't confirmed from
-  reading the source alone, and we didn't chase it further. That's a real
-  gap: it means we don't actually know whether "set a short client timeout"
-  would produce the timeout→retry→deeper-queue compounding scenario the
-  original retry-amplification experiment was designed to catch, or
-  whether timeouts under this SDK's async path just propagate as
-  uncaught exceptions with no retry at all. Needs either a source-level
-  answer (trace the actual exception type aiohttp raises on timeout
-  through to the retry predicate) or an empirical one (configure a short
-  timeout, force it to fire under load, see what happens) before shipping
-  with retries enabled at high concurrency.
+- **A latency-aware (not just error-aware) production guard.** A caller
+  with a fixed timeout, calling at high concurrency, will see a wall of
+  client-side *timeouts* (not 429s) once past ~150-250 concurrent — and
+  per the now-confirmed finding below, the SDK will not retry those on its
+  own. Evertune needs its own timeout/backpressure handling in front of
+  this provider if it wants that behavior; it isn't coming from the SDK's
+  defaults on this code path.
 - **More than two burst cycles**, ideally across a longer real idle gap (30s
   here) and against a colder-than-this-process client, to rule out cold-
   start effects with more confidence than two cycles can provide.

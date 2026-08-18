@@ -396,11 +396,48 @@ def analyze_retry_amplification():
               f"total_tokens={total_tokens}  mean_latency={statistics.mean(latencies):.0f}ms")
 
 
+def analyze_multi_process_test():
+    """Three independent processes (loadtest/experiments/multi_process_test.py),
+    each writing loadtest/results/multi_process_{tag}.jsonl. Compares each
+    process's own p50 against what the single-process escalation fit would
+    predict for (a) that process's own level alone and (b) the combined
+    total across all processes — the two competing hypotheses this
+    experiment was designed to separate. See FINDINGS.md's "Is the latency
+    wall real, or one process's own bottleneck?" for the interpretation.
+    """
+    tags = sorted(p.stem.replace("multi_process_", "")
+                  for p in RESULTS_DIR.glob("multi_process_*.jsonl"))
+    if not tags:
+        return
+
+    print("\n=== multi_process_test (independent processes, simultaneous) ===")
+    all_levels = set()
+    for tag in tags:
+        records = load(f"multi_process_{tag}")
+        errors = [r for r in records if r["error_class"]]
+        latencies = sorted(r["latency_ms"] for r in records if r["latency_ms"] is not None)
+        p50 = percentile(latencies, 0.5)
+        p95 = percentile(latencies, 0.95)
+        levels = set(r["concurrency_level"] for r in records)
+        all_levels |= levels
+        print(f"  process={tag}  n={len(records)}  errors={len(errors)}"
+              + (f"  classes={sorted(set(r['error_class'] for r in errors))}" if errors else "")
+              + f"  p50={p50:.0f}ms  p95={p95:.0f}ms")
+
+    if len(all_levels) == 1:
+        level = all_levels.pop()
+        lone_predicted = 42.0 * level - 665
+        combined_predicted = 42.0 * (level * len(tags)) - 665
+        print(f"  lone-process prediction at level={level}: {lone_predicted:.0f}ms")
+        print(f"  lone-process prediction at combined={level * len(tags)}: {combined_predicted:.0f}ms")
+
+
 if __name__ == "__main__":
     analyze_concurrency_sweep()
     analyze_thinking_budget_sweep()
     analyze_cost_model()
     analyze_output_variance()
     analyze_retry_amplification()
+    analyze_multi_process_test()
     analyze_burst_test()
     analyze_escalation_test()

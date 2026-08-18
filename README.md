@@ -95,8 +95,23 @@ requests/minute** of sustained effective throughput before things back up.
 A caller with a timeout would see what looks like an outage well before any
 error ever appears, and it means retry-based backpressure structurally
 can't help here (retries key off error codes; this failure mode produces
-none). Caveat we didn't hide: measured from one process on one machine —
-see the "next steps" answer below.
+none).
+
+**Follow-up: is that wall real, or one process's own bottleneck?** All of
+the above came from one Python process on one machine, so we ran it again
+from **three independent processes simultaneously** (separate event loops,
+connection pools, same total load). Result was genuinely mixed, not a
+clean answer: each process's latency tracked *its own* load level, not the
+combined total (evidence the queueing is per-process) — but one of the
+three also hit our **first-ever real HTTP error in this whole project**, a
+`429`, something a single process never triggered even at 2,000
+concurrent (evidence a real shared rate limit does exist and is
+reachable). Both are true at once. Confirming which effect dominates
+needs genuinely independent machines, not just independent processes on
+this one — see "next steps" below. We also confirmed from SDK source
+(not inferred) that client-side timeouts are **never retried** by the SDK
+on the async code path this provider uses — a real, resolved gap, not an
+open question anymore.
 
 We also tested a *sudden* spike vs. a gradual ramp (two idle→spike cycles
 at the measured ceiling) — no meaningful cold-vs-warm difference.
@@ -178,17 +193,16 @@ spend the *original* response object literally couldn't represent.
 
 ### "What you'd want to do next if this were going to production, and what you'd want to know before getting there."
 
-- **Confirm the ~1,400 req/min wall from more than one process/machine** —
-  the single highest-value open item. If it holds independently, it's a
-  real Vertex/DSQ-side limit to design around (client-side concurrency
-  limiting, or Google's Provisioned Throughput); if it doesn't, the limit
-  is on our side, not Google's.
+- **Reproduce the multi-process test from genuinely independent machines,
+  not just independent processes on one machine** — now the single
+  highest-value open item (narrowed, not newly discovered: we already ran
+  the same-machine version — see above). If the per-process latency
+  pattern holds from truly separate networks, it points to a real
+  per-client-ish Vertex/DSQ-side effect to design around (client-side
+  concurrency limiting, or Google's Provisioned Throughput); if it
+  doesn't, more of the effect is on our side than we think.
 - **A `finish_reason`-aware guard** in front of any mention-rate pipeline —
   the empty-response failure mode is silent and reproducible.
-- **Resolve whether client-side timeouts actually trigger the SDK's
-  retries** — the retry predicate is `httpx`-specific, but this provider's
-  async path uses `aiohttp`; left as an explicitly unconfirmed gap rather
-  than an assumed answer.
 - A decision on whether `temperature=0` is trustworthy as a single
   ground-truth call for Evertune's methodology, given it isn't fully
   deterministic.

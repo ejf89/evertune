@@ -169,6 +169,57 @@ challenge — the honest answer split into two parts:
       plainly what's now known to be on the other side of it, so a future
       reader doesn't assume "unbounded" from the absence of errors.
 
+## Phase 7: Closing two remaining open items (2026-08-18)
+
+Eric reviewed the two remaining open questions from Phase 6's write-up
+directly ("do we have to leave these things open?") and pushed for real
+answers rather than accepting them as permanently unresolved.
+
+- [x] **The client-timeout-vs-SDK-retry question — fully resolved from
+      source, not left as a gap.** Traced past the retry predicate (which
+      only told us it matches `httpx` exception types) into the actual
+      function `tenacity` wraps (`_async_request_once`) and read its
+      inline exception handling directly: it catches five specific
+      `aiohttp`/auth connection-error types, and `asyncio.TimeoutError` —
+      what a `ClientTimeout` expiry actually raises — is not one of them.
+      **Confirmed: a client-side timeout on this provider's real async
+      path is never retried by the SDK, full stop.** Moved from "What
+      we'd want before production" (an open gap) into the load findings
+      (a resolved result) in `FINDINGS.md` and the README.
+- [x] **Built and ran a multi-process follow-up to the escalation test**
+      (`loadtest/experiments/multi_process_test.py`) — three independent
+      Docker containers (separate processes/event loops/connection pools)
+      launched simultaneously from the host, each hammering Vertex at
+      concurrency=700 (combined ~2,100, comparable to the prior
+      2,000-concurrent single-process max). Confirmed via `docker ps`
+      that all three were genuinely running concurrently, not
+      sequentially.
+      - Result was **mixed, not a clean verdict either way** — and
+        explicitly written up that way rather than forced into a tidy
+        answer: each process's own p50 (~28-30s) matched what a *lone*
+        process at 700 would predict (~28.7s), not what a lone process at
+        the *combined* 2,100 would predict (~87.5s) — evidence the
+        latency curve is substantially per-process. But one of the three
+        processes also hit a real `429 rate_limited` — this project's
+        **first HTTP error ever**, after ~9,000+ error-free single-process
+        requests across every prior experiment. Both facts are true at
+        once; write-up says so rather than picking whichever one sounds
+        more conclusive.
+      - Added `analyze_multi_process_test()` to `loadtest/analyze.py`
+        (prints per-process stats plus both competing predictions) and
+        committed the three `loadtest/results/multi_process_{a,b,c}.jsonl`
+        files, matching the "every number traces to committed data" rule.
+      - **Honest limit stated in `FINDINGS.md`, not glossed over:** all
+        three processes still ran on one Mac, sharing its network
+        interface and Docker Desktop's virtualized networking — this
+        experiment separates "single process" from "single machine,"
+        rules out one specific alternative explanation, but doesn't reach
+        a genuinely independent network. That's still the honest
+        remaining gap, now narrower than before rather than closed.
+- [x] Updated `README.md`'s load-behavior answer and "next steps" list to
+      reflect both resolutions — pyflakes clean, 37/37 tests passing
+      throughout.
+
 Remaining: review pass, then push branch + open the PR.
 
 ## Phase 0: Environment recon (de-risking auth before the real work)
