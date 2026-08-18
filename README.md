@@ -27,6 +27,10 @@ We're less interested in a "completed checklist" and more interested in what you
 
 # Results: what we built and found
 
+**For a non-technical summary** — what was built and what we found, in plain
+language with diagrams, no code — see **[the report site](https://ejf89.github.io/evertune/)**.
+The section below is the technical version, for engineering review.
+
 This section is a self-contained digest of the whole submission — everything
 below traces to a committed file and re-derives from raw data, nothing is
 asserted without a source. For the full depth behind any of it:
