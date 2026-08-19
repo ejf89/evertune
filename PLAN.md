@@ -285,10 +285,11 @@ own reasoning about it.
       sanity-check the direction before committing to it; the earlier
       phrasing didn't say that.
 
-Remaining: final full test run + pyflakes check, sync the two private
-study artifacts with the corrected numbers, commit and push everything to
-`ejf89/evertune`, then open the PR against that fork (never against
-`Evertune-AI/takehome` directly).
+All done: full test suite (37/37) and pyflakes clean, both private study
+artifacts synced with the corrected numbers, committed and pushed to
+`ejf89/evertune` (never `Evertune-AI/takehome`) — PR #1, already open
+against my own fork from Phase 7, now carries this commit as its latest.
+Still holding off on actually notifying Evertune until Eric says go.
 
 ## Phase 0: Environment recon (de-risking auth before the real work)
 
