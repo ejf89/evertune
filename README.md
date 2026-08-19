@@ -47,9 +47,10 @@ asserted without a source. For the full depth behind any of it:
   and printed summary from it yourself.
 
 **Quick facts:** `GeminiVertex` provider (`llm/gemini_vertex.py`) · 37 unit
-tests passing, `pyflakes` clean · 6 load/eval experiments · 2 follow-up audit
-rounds after the initial submission · every chart below regenerable from
-committed data, zero illustrative numbers.
+tests passing, `pyflakes` clean · 7 load/eval experiments · several audit
+rounds before pushing/opening the PR (nothing had been "submitted" yet at
+any point — see `PLAN.md`) · every chart below regenerable from committed
+data, zero illustrative numbers.
 
 ## The provider, in one paragraph
 
@@ -79,20 +80,29 @@ the API responds. A generic "say hi" load-test prompt would exercise the
 plumbing but tell us nothing about the thing you actually care about.
 
 **What we observed:** zero HTTP errors from 1 through **2,000 concurrent
-requests** (~7,400 total across all load experiments) — but that's not the
-same as "no ceiling." Latency is flat only up to ~150–250 concurrent; past
-that, p50 grows almost perfectly linearly (**r² = 0.99**), from ~7s up to
+requests** (8,532 total across all load experiments) — but that's not the
+same as "no ceiling." Latency is flat only up to ~100 concurrent; past
+that, p50 grows almost perfectly linearly (**r² = 0.99**), from ~6s up to
 **87 seconds at 2,000 concurrent**:
 
 ![Latency vs. concurrency, full range](loadtest/results/charts/concurrency_latency_full_range.png)
 
 | Concurrency | Errors | p50 |
 |---:|---:|---:|
-| 1–150 | 0 | ~5.5–8.2s (flat) |
+| 1–100 | 0 | ~5.6–7.4s (flat) |
+| 150 | 0 | 9.4s (first real step up) |
 | 250 | 0 | 12.1s |
 | 600 | 0 | 23.7s |
 | 1,200 | 0 | 47.2s |
 | 2,000 | 0 | 87.4s |
+
+*(150's number above is corrected from an earlier version of this repo,
+which had a real bug: the concurrency sweep fixed its repeated-passes count
+regardless of level, so the semaphore never actually reached above ~36
+in-flight requests at labels 50 and up — meaning "flat through 150" was
+never really tested at 150. Fixed and rerun; see `FINDINGS.md`'s
+"Concurrency sweep" for the full story, including why we're stating this
+plainly rather than quietly patching the old number.)*
 
 The system never fails loudly — it just queues, implying roughly **1,400
 requests/minute** of sustained effective throughput before things back up.
@@ -168,9 +178,10 @@ prompt, `temperature=0`: **7 distinct answer strings**, not 1:
 
 Variance isn't uniform across brands — five brands held 85–98% mention
 rates regardless of temperature, while two sat right on the model's
-inclusion/exclusion boundary (4% and 56% across temperatures). A single
-sample at `temperature=0` is not a clean-room-reproducible number, and
-which brands need more samples can't be known without a variance check per
+inclusion/exclusion boundary: Nike went from 4% at `temperature=0` to 56%
+at `temperature=1`, Adidas from 1% to 19%. A single sample at
+`temperature=0` is not a clean-room-reproducible number, and which brands
+need more samples can't be known without a variance check per
 category.
 
 **What surprised us most relative to other LLMs:** the invisible,
@@ -208,6 +219,15 @@ spend the *original* response object literally couldn't represent.
   Shared Quota** — no small fixed allocation to protect — so that reasoning
   was wrong. We corrected it, escalated further with sign-off, and that's
   what actually produced the load finding above.
+- **A second, unrelated thing that turned out wrong: the "150" measurement
+  itself.** An external review of this repo caught a real bug — the
+  concurrency sweep held its repeated-passes count fixed regardless of the
+  level being tested, so its semaphore never actually reached above ~36
+  in-flight requests once the labeled level exceeded that. "Flat through
+  150" had never really been tested at 150. We verified the bug ourselves
+  before trusting the review, fixed it, and reran — see the load-behavior
+  answer above for the corrected numbers. `parallelism()`'s default moved
+  from 150 to **100** as a direct result.
 
 ### "What you'd want to do next if this were going to production, and what you'd want to know before getting there."
 

@@ -10,10 +10,18 @@ Depends on concurrency_sweep.py having already run. Falls back to a
 conservative default if it hasn't (with a clear warning) rather than
 failing outright.
 
+**2026-08-19 fix** (external review caught a real bug): this used to fire
+a fixed `REPEATS=3` regardless of the tested level, so the concurrency
+semaphore was never actually saturated once the level exceeded 36
+(`len(WORKLOAD) * REPEATS`) — "tested at concurrency=150" was really
+tested at 36. `repeats` now scales with the level, matching
+escalation_test.py's existing correct pattern.
+
 Run from repo root: python -m loadtest.experiments.retry_amplification
 """
 
 import asyncio
+import math
 import os
 from pathlib import Path
 
@@ -25,7 +33,6 @@ RESULTS_PATH = "loadtest/results/retry_amplification.jsonl"
 CONCURRENCY_RESULTS_PATH = Path("loadtest/results/concurrency_sweep.jsonl")
 ENVIRONMENT = os.environ.get("LOADTEST_ENVIRONMENT", "container")
 TEMPERATURE = 0.7
-REPEATS = 3
 FALLBACK_LEVEL = 25
 
 
@@ -35,7 +42,8 @@ def near_ceiling_level() -> int:
 
 async def main():
     level = near_ceiling_level()
-    print(f"[retry_amplification] testing at concurrency={level} "
+    repeats = math.ceil(level / len(WORKLOAD))  # saturate the semaphore at `level`, one real round
+    print(f"[retry_amplification] testing at concurrency={level} repeats={repeats} "
           f"(from concurrency_sweep's own ceiling)")
 
     all_records = []
@@ -48,7 +56,7 @@ async def main():
             temperature=TEMPERATURE,
             concurrency_level=level,
             environment=ENVIRONMENT,
-            repeats=REPEATS,
+            repeats=repeats,
         )
         errors = [r for r in records if r.error_class]
         total_tokens = sum(r.total_tokens for r in records)

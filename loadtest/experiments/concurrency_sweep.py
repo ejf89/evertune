@@ -1,19 +1,25 @@
 """Experiment 3 (must-run, top billing): concurrency sweep.
 
-**Revised 2026-08-17** (follow-up pass, see PLAN.md/EXECUTION.md): the
-original run (levels 1/5/10/25/50, single n=12 pass per level) found zero
-errors and, by its own admission in FINDINGS.md, produced p50/p95 numbers
-noisy enough to bounce around non-monotonically — much more likely sampling
-noise from n=12 than a real signal. Two changes fix that without changing
-the experiment's intent:
-  1. `REPEATS` repeated passes per level (not 1), so each level's p50/p95
-     is drawn from a real distribution instead of 12 samples.
-  2. Levels extended past the old ceiling (75/100/150 added) specifically
-     to try to actually trigger errors/429s — "we didn't find a ceiling"
-     is a weaker result than "we pushed further and still didn't," and the
-     retry-amplification experiment (Experiment 4) needs a real ceiling to
-     be a meaningful test of retries under pressure, not just a repeat of
-     this experiment's own non-result.
+**Revised 2026-08-17** (follow-up pass): the original run (levels
+1/5/10/25/50, single n=12 pass per level) found zero errors and, by its own
+admission in FINDINGS.md, produced p50/p95 numbers noisy enough to bounce
+around non-monotonically — much more likely sampling noise from n=12 than a
+real signal. Two changes were made at the time: repeated passes per level,
+and levels extended past the old ceiling (75/100/150 added).
+
+**Second revision, 2026-08-19** (external review caught a real bug): the
+2026-08-17 fix used a FIXED `REPEATS=3` at every level. Since `run_batch`
+creates exactly `len(WORKLOAD) * repeats` tasks behind a semaphore of size
+`concurrency_level`, a fixed repeats count means the semaphore never binds
+once its capacity exceeds the actual task count — at levels 50/75/100/150,
+only 36 tasks ever existed, so the semaphore's 50-150 capacity was never
+reached. Every level above 25 was silently re-testing the same ~36 real
+concurrent requests. `escalation_test.py` (built the same day, later) got
+this right — `repeats = ceil(level / len(WORKLOAD))` — but the fix was
+never retrofitted here. This revision scales repeats per level so each one
+is genuinely saturated, while keeping at least 2 full rounds through the
+semaphore at every level (not just 1) so the original noise-reduction intent
+of repeated passes is preserved, not undone by the saturation fix.
 
 Blast-radius reasoning is unchanged from the original (evertune-tests has
 multiple forks/PRs sharing quota) — this still stops at a stated, bounded
@@ -28,6 +34,7 @@ Run from repo root: python -m loadtest.experiments.concurrency_sweep
 """
 
 import asyncio
+import math
 import os
 
 from llm import GeminiVertex
@@ -38,7 +45,7 @@ RESULTS_PATH = "loadtest/results/concurrency_sweep.jsonl"
 ENVIRONMENT = os.environ.get("LOADTEST_ENVIRONMENT", "container")
 TEMPERATURE = 0.7
 LEVELS = [1, 5, 10, 25, 50, 75, 100, 150]
-REPEATS = 3  # 12-item workload x 3 = 36 requests/level, not n=12 single-pass
+MIN_REPEATS = 3  # floor for low levels, where 3x already comfortably saturates
 
 
 async def main():
@@ -46,14 +53,19 @@ async def main():
     provider = GeminiVertex(retry_attempts=1)  # retries off — see module docstring
 
     for level in LEVELS:
-        print(f"[concurrency_sweep] level={level}")
+        # At least 2 full rounds through a saturated semaphore, and never
+        # fewer than MIN_REPEATS — see the "Second revision" note above for
+        # why a fixed repeats count was wrong.
+        repeats = max(MIN_REPEATS, math.ceil(level * 2 / len(WORKLOAD)))
+        n_requests = repeats * len(WORKLOAD)
+        print(f"[concurrency_sweep] level={level} repeats={repeats} (~{n_requests} requests)")
         records = await run_batch(
             provider,
             list(WORKLOAD),
             temperature=TEMPERATURE,
             concurrency_level=level,
             environment=ENVIRONMENT,
-            repeats=REPEATS,
+            repeats=repeats,
         )
         errors = [r for r in records if r.error_class]
         latencies = sorted(r.latency_ms for r in records if r.latency_ms is not None)

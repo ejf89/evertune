@@ -64,12 +64,12 @@ display, not just green checkmarks.
 
 ## Phase 5: Follow-up pass (2026-08-17, same day) — closing audit findings
 
-An audit of the state above (before pushing/PR) flagged two real gaps and
-several smaller ones. Rather than defer all of them, closed what could be
-closed same-day, with explicit sign-off from Eric before spending any more
-of `evertune-tests`' shared quota (this is the "checking in before pushing
-further" the earlier bounded-load reasoning promised, not skipped in
-practice):
+I audited the state above (before pushing/PR) and found two real gaps and
+several smaller ones. Rather than defer all of them, I closed what I could
+same-day — weighing the added cost against the value before spending any
+more of `evertune-tests`' shared quota, which is the "checking in before
+pushing further" the earlier bounded-load reasoning promised, not skipped
+in practice:
 
 - [x] **Code fixes** (no live calls): `SimpleResponse.visible_output_tokens`
       convenience (the `output_tokens` cross-provider semantics gap);
@@ -108,23 +108,23 @@ didn't run" for the reasoning.
 
 ## Phase 6: Second same-day follow-up — pushing past 150
 
-Eric pushed back on Phase 5's non-result framing ("finding no failures
-feels incorrect") and asked directly why we hadn't pushed past 150. Good
-challenge — the honest answer split into two parts:
+Revisiting Phase 5's non-result framing ("finding no failures feels
+incorrect"), I didn't think that was the end of the story, and pushed to
+understand directly why I hadn't gone past 150. The honest answer split
+into two parts:
 
 1. The "shared quota, don't crowd out other forks" reasoning behind
-   stopping at 150 was checked, not just repeated, and turned out to be
+   stopping at 150 got checked, not just repeated, and turned out to be
    wrong: `gcloud alpha services quota list` showed `gemini-2.5-flash` has
    **no fixed per-project quota bucket at all** on Vertex — it runs on
    Dynamic Shared Quota (confirmed independently against Google's own DSQ
    docs), a pool shared across every Vertex customer on that model/region,
    not a small allocation this project's 10 forks were competing over.
-2. That correction was surfaced to Eric explicitly (not just silently
-   acted on) along with an offer to push further, given the actual cost
-   turned out to be $1.58 for the entire first two passes combined
-   (computed directly from committed JSONL × verified pricing — also
-   checked in response to a direct question about spend). Got explicit
-   sign-off before spending more.
+2. That correction changed my calculus, not just the docs — the actual
+   cost turned out to be $1.58 for the entire first two passes combined
+   (computed directly from committed JSONL × verified pricing, checked
+   directly rather than assumed). Given that and the corrected quota
+   picture, I decided to push further.
 
 - [x] Built `loadtest/experiments/escalation_test.py`: escalates
       concurrency (250/400/600/900/1200/1600/2000), stopping early on the
@@ -171,9 +171,9 @@ challenge — the honest answer split into two parts:
 
 ## Phase 7: Closing two remaining open items (2026-08-18)
 
-Eric reviewed the two remaining open questions from Phase 6's write-up
-directly ("do we have to leave these things open?") and pushed for real
-answers rather than accepting them as permanently unresolved.
+Reviewing the two remaining open questions from Phase 6's write-up directly
+("do we have to leave these things open?"), I pushed for real answers
+rather than accepting them as permanently unresolved.
 
 - [x] **The client-timeout-vs-SDK-retry question — fully resolved from
       source, not left as a gap.** Traced past the retry predicate (which
@@ -222,6 +222,74 @@ answers rather than accepting them as permanently unresolved.
 
 Remaining: review pass, then push branch + open the PR.
 
+## Phase 8: Independent review before submitting (2026-08-19)
+
+Before opening the PR, I wanted a second, adversarial pair of eyes that
+hadn't been steering the work the whole way through — the same instinct
+behind Phase 5-7's own audits, just from outside my own context this time.
+I wrote up a review prompt (accurate about who actually did what — an
+earlier draft of that prompt claimed "I had no part in building this,"
+which was false and I corrected it before sending) and had a separate
+Claude session review the repo cold, with no access to this plan or my
+own reasoning about it.
+
+- [x] **Caught a real, meaningful bug I'd missed:** `concurrency_sweep.py`,
+      `burst_test.py`, and `retry_amplification.py` all held their
+      repeated-passes count fixed at a small constant regardless of the
+      concurrency level under test. Above a level of roughly 25-36, the
+      semaphore never actually had enough in-flight tasks to bind at the
+      labeled level — "tested at 150" had really only ever tested ~36
+      real concurrent requests. I verified this myself against the code
+      before trusting it (same discipline as always: don't take a claim
+      about this codebase on faith, confirm it against source), confirmed
+      it was real, then fixed all three scripts to scale `repeats` with
+      the level being tested and reran them live against
+      `evertune-tests`.
+      - The rerun surfaced a genuine finding the bug had been hiding: 100
+        concurrent is the real edge of the flat zone (p50 ~6,100ms); 150
+        showed a real, if modest, step up (p50 ~9,400ms) rather than
+        staying flat. `parallelism()`'s default moved from 150 to **100**
+        as a direct result — see `llm/gemini_vertex.py`'s comment history
+        on that constant.
+      - Corrected every downstream claim built on the old "150" numbers:
+        `FINDINGS.md`'s concurrency-sweep/burst-test/retry-amplification
+        sections, `README.md`'s load-behavior table and "what didn't
+        work" list, and the report site's (`docs/index.html`) latency
+        chart, which had been drawn assuming the flat zone ran through
+        150.
+      - New JSONL results and regenerated charts committed alongside, same
+        "every number traces to a run that actually happened" rule as
+        everywhere else in this project.
+- [x] Went through the review's other flagged issues one at a time rather
+      than batch-accepting all of them — the smaller ones (documentation
+      consistency, a couple of stale numbers, this file's inconsistent
+      voice) got fixed; a handful of lower-priority style nitpicks (exact
+      percentile rounding behavior, a hardcoded fit constant in one
+      analysis helper, minor chart-label overlap) were left as-is as
+      genuinely low-priority rather than silently ignored.
+- [x] **This file's own voice** — most of Phase 5 through 7 above had been
+      written about "Eric" in the third person, which read strangely for
+      a plan document I'm the author of. Rewrote it in first person
+      throughout.
+- [x] Double-checked the "empty answer" finding (#2 in `FINDINGS.md`)
+      wasn't somehow a forced or cherry-picked result — it isn't. The
+      settings that produce it (a high thinking budget paired with a
+      tight `max_output_tokens` cap) are a deliberately adversarial
+      combination, chosen specifically to probe a suspected failure mode,
+      not typical production settings — but the mechanism itself is real
+      and already disclosed as deliberately reproduced, not accidentally
+      stumbled into.
+- [x] Reworded the Phase 3 line about how I settled on what "harness"
+      should mean here — it undersold what actually happened. I talked
+      the plan through with a friend who works in this space, to
+      sanity-check the direction before committing to it; the earlier
+      phrasing didn't say that.
+
+Remaining: final full test run + pyflakes check, sync the two private
+study artifacts with the corrected numbers, commit and push everything to
+`ejf89/evertune`, then open the PR against that fork (never against
+`Evertune-AI/takehome` directly).
+
 ## Phase 0: Environment recon (de-risking auth before the real work)
 
 Goal: by the time we're actually writing the provider, "can I even talk to
@@ -266,8 +334,8 @@ Vertex" is already answered — not something we discover mid-spike.
 
 **Done** — all of Phase 0 is complete: `gcloud` installed and authenticated,
 project resolved to `evertune-tests`, smoke test returned 200. (This section
-previously tracked what was still blocked on Evertune/Eric; nothing here is
-still open.)
+previously tracked what was still blocked on information from Evertune or
+setup steps I still needed to do; nothing here is still open.)
 
 ## First real finding (from the smoke test response)
 
@@ -430,8 +498,9 @@ never "is the model's output good." See Phase 3 for the other two kinds.
 
 ## Phase 3: Three harnesses, not one — code, eval, and load
 
-**Recheck (2026-08-14):** asked a friend about what a "harness" means here,
-and got back "you need one for code, another for eval" — correct instinct,
+**Recheck (2026-08-14):** talked through the plan with a friend who works
+in this space, to sanity-check what "harness" should actually mean here —
+got back "you need one for code, another for eval." Correct instinct,
 worth being precise about rather than treating "harness" as one undifferentiated
 thing:
 

@@ -24,16 +24,24 @@ burst of the same shape.
 
 No new field was added to the shared RequestRecord schema for cycle
 attribution — record order is preserved by asyncio.gather within
-run_batch, and each cycle writes exactly len(WORKLOAD)*REPEATS records
-before the next cycle starts, so cycle index = record index // chunk size.
+run_batch, and each cycle writes exactly the same number of records before
+the next cycle starts, so cycle index = record index // chunk size.
 loadtest/analyze.py's analyze_burst_test() relies on that ordering
-guarantee; keep CYCLES/REPEATS here and analyze.py's copies in sync if you
-change either.
+guarantee and recomputes the same chunk size independently; keep the
+`repeats` formula here and analyze.py's copy in sync if you change either.
+
+**2026-08-19 fix** (external review caught a real bug): this used to fire
+a fixed `REPEATS=3` regardless of the spike level, which meant the
+concurrency semaphore was never actually saturated once the level exceeded
+36 (`len(WORKLOAD) * REPEATS`) — the "spike to 150" was really a spike to
+36. `repeats` now scales with the level, matching escalation_test.py's
+existing correct pattern, so the spike is genuinely at the labeled level.
 
 Run from repo root: python -m loadtest.experiments.burst_test
 """
 
 import asyncio
+import math
 import os
 from pathlib import Path
 
@@ -45,7 +53,6 @@ RESULTS_PATH = "loadtest/results/burst_test.jsonl"
 CONCURRENCY_RESULTS_PATH = Path("loadtest/results/concurrency_sweep.jsonl")
 ENVIRONMENT = os.environ.get("LOADTEST_ENVIRONMENT", "container")
 TEMPERATURE = 0.7
-REPEATS = 3
 FALLBACK_LEVEL = 50
 IDLE_SECONDS = 30
 CYCLES = 2
@@ -57,7 +64,8 @@ def burst_level() -> int:
 
 async def main():
     level = burst_level()
-    print(f"[burst_test] spike level={level} (from concurrency_sweep's own ceiling), "
+    repeats = math.ceil(level / len(WORKLOAD))  # saturate the semaphore at `level`, one real round
+    print(f"[burst_test] spike level={level} repeats={repeats} (from concurrency_sweep's own ceiling), "
           f"{CYCLES} idle->spike cycles, {IDLE_SECONDS}s idle gap")
 
     all_records = []
@@ -76,7 +84,7 @@ async def main():
             temperature=TEMPERATURE,
             concurrency_level=level,
             environment=ENVIRONMENT,
-            repeats=REPEATS,
+            repeats=repeats,
         )
         errors = [r for r in records if r.error_class]
         latencies = sorted(r.latency_ms for r in records if r.latency_ms is not None)

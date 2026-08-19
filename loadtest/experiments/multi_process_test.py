@@ -17,9 +17,11 @@ own event loop / connection pool is the cause, by running the exact same
 work from THREE independent OS processes at once, each with its own
 Python interpreter, event loop, and aiohttp session.
 
-Design: run this script multiple times concurrently (via separate `docker
-run` invocations from the host — see EXECUTION.md for the exact commands
-used), each with a distinct PROCESS_TAG so results don't collide. Each
+Design: run this script multiple times concurrently — for example, three
+separate `docker run` invocations launched from the host in the same
+shell command/message so they genuinely overlap in time (sequential
+invocations would not) — each with a distinct PROCESS_TAG so results
+don't collide. Each
 process independently requests LEVEL concurrent in-flight requests. If
 each process sees roughly what a LONE process would see at LEVEL (per the
 escalation fit: p50 ~= 42ms * LEVEL - 665ms), that's evidence each

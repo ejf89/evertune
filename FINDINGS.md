@@ -9,18 +9,36 @@ with a placeholder. All runs happened inside the same Docker container
 `us-central1`.
 
 The eval findings (thinking-budget sweep, output variance) are from the
-original 2026-08-17 pass. The load findings (concurrency sweep, retry
-amplification), the cost model, and the burst test are from a same-day
-**follow-up pass**, run to close two gaps an audit of the first pass
-identified: thin load evidence (single n=12 pass per concurrency level, no
-ceiling found within a narrow range) and no verified cost figures. A
-**second same-day follow-up** then escalated concurrency well past that
-pass's own 150 stopping point, after checking the project's actual quota
-settings showed the original "shared quota, stay conservative" reasoning
-was more conservative than it needed to be (see "Escalation past 150"
-below) — that's where the latency-wall finding above comes from. Where a
-section reflects one of the follow-up passes rather than the original,
-that's called out explicitly.
+original pass, run **2026-08-14**. The load findings (concurrency sweep,
+retry amplification), the cost model, and the burst test are from a
+**follow-up pass three days later (2026-08-17)**, run to close two gaps an
+audit of the first pass identified: thin load evidence (single n=12 pass
+per concurrency level, no ceiling found within a narrow range) and no
+verified cost figures. A **second follow-up**, same day as the first
+(2026-08-17), then escalated concurrency well past that pass's own 150
+stopping point, after checking the project's actual quota settings showed
+the original "shared quota, stay conservative" reasoning was more
+conservative than it needed to be (see "Escalation past 150" below) —
+that's where the latency-wall finding above comes from. A **third
+follow-up (2026-08-18)** resolved the client-timeout-retry question from
+source and ran a multi-process test. A **fourth follow-up (2026-08-19)**
+re-ran the concurrency sweep, burst test, and retry amplification after an
+external review of this repo caught a real bug in their repeats scaling —
+see the "what changed" note in the concurrency sweep section below. Where
+a section reflects a follow-up pass rather than the original, that's
+called out explicitly, with the actual date rather than "same-day," which
+overstated how close together these passes were.
+
+**On traceability across reruns:** `write_jsonl(..., append=False)`
+overwrites the previous run's file each time an experiment reruns, by
+design (PLAN.md's "Raw data" section) — so numbers quoted from an
+*earlier* pass (e.g. the original concurrency sweep's "zero errors through
+50, n=12 single-pass") no longer have a committed file to re-derive from
+directly; they're preserved only as prose in this document and
+`PLAN.md`/`EXECUTION.md`'s logs, not as re-runnable data. Every number
+currently presented as live/current in this document does still trace to
+a committed file — this note is about the superseded intermediate numbers
+mentioned for historical context, not the findings themselves.
 
 Design rationale for *why* each experiment exists lives in `PLAN.md` — this
 document is the results, not a repeat of the reasoning.
@@ -40,11 +58,12 @@ document is the results, not a repeat of the reasoning.
   calls at `temperature=0` produced 7 distinct answer strings, not 1.
 - **There IS a real ceiling — it just isn't an error, it's a latency wall.**
   Zero HTTP errors all the way through 2,000 concurrent requests (13× our
-  original 150 stop). But latency stays flat (~6–8s p50) only up to ~150–250
-  concurrent, then grows **almost perfectly linearly** from there to 2,000
-  (r²=0.99) — p50 goes from ~7s to **87 seconds**. Nothing ever fails; it
-  just queues, and the queue gets a lot longer than "no ceiling found" would
-  have implied. See "Escalation past 150" below for the numbers.
+  original 150 stop). But latency stays flat (~5.6–7.4s p50) only up to
+  ~100 concurrent, then grows **almost perfectly linearly** from there to
+  2,000 (r²=0.99) — p50 goes from ~6s to **87 seconds**. Nothing ever
+  fails; it just queues, and the queue gets a lot longer than "no ceiling
+  found" would have implied. See "Escalation past 150" below for the
+  numbers.
 - **A follow-up multi-process test found the picture is mixed, not
   one-sided: the latency curve looks per-process, but a real shared rate
   limit does exist.** Three independent processes hammering Vertex
@@ -189,41 +208,60 @@ margin over anything else measured here.
 module docstring): the original pass below found zero errors through
 concurrency 50 but only sampled n=12 per level once, so the shape of the
 curve wasn't trustworthy and the ceiling question was genuinely open. This
-revision (a) repeats each level 3× (36 requests/level instead of 12) and
-(b) extends the range to 150 (3× the original stop) specifically to try to
-trigger real failures. Same blast-radius reasoning as before — a bounded,
-stated ceiling, not open-ended escalation — just a higher one.
+revision (a) repeats each level 3× and (b) extends the range to 150 (3×
+the original stop) specifically to try to trigger real failures. Same
+blast-radius reasoning as before — a bounded, stated ceiling, not
+open-ended escalation — just a higher one.
+
+**Revised again, 2026-08-19, for a real bug, not a refinement.** An
+external review of this repo caught something the 2026-08-17 fix above
+didn't actually fix: it kept `REPEATS` **fixed at 3** regardless of the
+level being tested. Since `run_batch` only ever creates
+`len(WORKLOAD) * repeats` tasks (36, at a fixed repeats=3) behind a
+semaphore sized to `concurrency_level`, the semaphore never bound once its
+capacity exceeded 36 — every level from 50 through 150 was silently
+re-testing the same ~36 real concurrent requests, not the labeled level.
+`escalation_test.py` (built later the same week) got this right by scaling
+repeats with the level; that fix was never retrofitted here. Rerun with
+repeats now scaled to genuinely saturate each level (at least 2 full
+rounds through the semaphore, so the original noise-reduction intent isn't
+lost either) — see the corrected table below. The takeaway changed in a
+real way, not just a technicality: see "what changed" after the table.
 
 ### Concurrency sweep
 
 ![Latency vs. concurrency](loadtest/results/charts/concurrency_latency.png)
 
-12 workload questions × 3 repeats per level (n=36/level), `temperature=0.7`,
+12 workload questions, repeats scaled per level to genuinely saturate the
+semaphore (not a fixed count — see the correction above), `temperature=0.7`,
 retries off, `environment=container`:
 
-| Concurrency | Errors | p50 | p95 |
-|---:|---:|---:|---:|
-| 1 | 0 | 6,155 ms | 13,012 ms |
-| 5 | 0 | 6,025 ms | 13,589 ms |
-| 10 | 0 | 5,476 ms | 14,450 ms |
-| 25 | 0 | 6,008 ms | 14,666 ms |
-| 50 | 0 | 6,149 ms | 12,363 ms |
-| 75 | 0 | 5,826 ms | 14,142 ms |
-| 100 | 0 | 8,185 ms | 14,094 ms |
-| 150 | 0 | 7,146 ms | 14,508 ms |
+| Concurrency | Requests | Errors | p50 | p95 |
+|---:|---:|---:|---:|---:|
+| 1 | 36 | 0 | 5,618 ms | 15,215 ms |
+| 5 | 36 | 0 | 7,395 ms | 13,956 ms |
+| 10 | 36 | 0 | 7,002 ms | 12,925 ms |
+| 25 | 60 | 0 | 5,676 ms | 12,457 ms |
+| 50 | 108 | 0 | 5,949 ms | 13,537 ms |
+| 75 | 156 | 0 | 6,205 ms | 13,640 ms |
+| 100 | 204 | 0 | 6,077 ms | 14,603 ms |
+| 150 | 300 | 0 | 9,382 ms | 17,173 ms |
 
-**Zero errors across all 288 requests, 1 through 150.** We pushed 3× past
-the original stopping point specifically to test whether "no ceiling found"
-was a real result or an artifact of not pushing hard enough — it holds
-within this range. The curve is genuinely flat rather than noisy-looking:
-p50 stays in a ~5,500–8,200ms band and p95 in a ~12,000–14,700ms band
-across the *entire* 13-fold range from 1 to 150 concurrent requests, with
-no upward trend and no error cliff. `parallelism()`'s default is updated
-from 50 to **150** as a result, in `llm/gemini_vertex.py` — that update
-still stands even after the escalation below, since 150 remains the
-highest level we confirmed is genuinely flat, not degraded. What "stopping
-at 150 by deliberate choice" turned out to mean, once we kept going, is the
-next section.
+**Zero errors across all 936 requests, 1 through 150 — that part of the
+original finding survives.** But **what changed**: with concurrency
+genuinely reaching 150 for the first time, p50 there (9,382ms) is
+noticeably higher than the flat band below it (~5,600–7,400ms at levels
+1–100) — not a cliff, and nowhere near the escalation section's climbing
+zone (12,000ms+ at 250), but a real, measurable step up that the buggy
+data had been hiding by silently re-testing 36 at every level above 25.
+**100 is now the highest level confirmed genuinely flat; 150 is where the
+flat zone visibly starts to end**, roughly a level earlier than the
+original (buggy) "flat through 150" claim implied. `parallelism()`'s
+default is updated to **100** as a result, in `llm/gemini_vertex.py` —
+its comment now traces the value's full history (10 → 50 → a
+never-actually-reached 150 → 100), including the bug that produced the
+intermediate wrong value, rather than presenting the current number as if
+it always looked this way.
 
 ### Escalation past 150 — the real shape of the ceiling
 
@@ -253,7 +291,9 @@ until something actually gave, or a hard sanity cap (2,000) was hit:
 
 **Still zero HTTP errors, even at 2,000 concurrent (6,972 total requests in
 this experiment alone).** But p50 latency grows almost perfectly linearly
-above ~150–250: a line fit through the escalation's seven points gives
+above ~100–250 (the corrected concurrency sweep above already shows the
+climb starting at 150; this escalation's own lowest point, 250, continues
+that same trend): a line fit through the escalation's seven points gives
 `p50 ≈ 42ms × concurrency − 665ms` with **r² = 0.99** — an extremely clean
 fit, not a noisy trend. That slope implies a sustained effective throughput
 of roughly **24 requests/second (~1,400 requests/minute)**: push more
@@ -293,37 +333,41 @@ from PLAN.md's optional tier: the sweep above ramps *gradually* (1, then 5,
 then 10, ...), which is a different shape of load than a real traffic
 spike (idle, then suddenly high concurrency, no ramp). Two idle→spike
 cycles, 30s idle gap, concurrency=150 (the sweep's own ceiling), fresh
-`GeminiVertex`/client per cycle:
+`GeminiVertex`/client per cycle. **Rerun 2026-08-19** alongside the
+concurrency-sweep bug fix — this experiment shared the same fixed-repeats
+bug (the "150" spike was really a spike of 36), so these are the first
+numbers that genuinely reached 150 concurrent:
 
-| Cycle | Errors | p50 | p95 |
-|---|---:|---:|---:|
-| 1 (cold — first request this process makes) | 0 | 7,812 ms | 14,642 ms |
-| 2 (warm — after one prior burst + 30s idle) | 0 | 6,695 ms | 12,494 ms |
+| Cycle | Requests | Errors | p50 | p95 |
+|---|---:|---:|---:|---:|
+| 1 (cold — first request this process makes) | 156 | 0 | 9,038 ms | 14,967 ms |
+| 2 (warm — after one prior burst + 30s idle) | 156 | 0 | 9,640 ms | 16,339 ms |
 
-**No meaningful cold-vs-warm difference.** Both cycles land inside the same
-p50/p95 band the concurrency sweep already established at this level —
-cycle 1 isn't the outlier a cold-start-penalty hypothesis would predict.
-This is a genuine (if modest) result, not a non-result: a sudden spike to
-150 concurrent requests, from a cold client, with no ramp, looks the same
-as the sweep's gradual climb to the same level. Two cycles is a thin sample
-for ruling out cold-start effects entirely — see "What we'd want before
-production."
+**Still no meaningful cold-vs-warm difference** — both cycles land close
+together, consistent with the corrected concurrency sweep's own p50 at 150
+(9,382ms): cycle 1 isn't the outlier a cold-start-penalty hypothesis would
+predict. A sudden spike to a genuinely-saturated 150 concurrent requests,
+from a cold client, with no ramp, looks the same as the sweep's gradual
+climb to the same level. Two cycles is still a thin sample for ruling out
+cold-start effects entirely — see "What we'd want before production."
 
 ### Retry amplification — still an honest non-result, now better-evidenced
 
 Tested at concurrency=150 (read directly from the concurrency sweep's own
-new ceiling, not a separately chosen number — up from 50 in the original
-pass), 12 questions × 3 repeats × 2 configurations:
+ceiling, not a separately chosen number). **Rerun 2026-08-19** — this
+experiment shared the same fixed-repeats bug as the sweep above ("tested
+at concurrency=150" was really tested at 36); repeats now scale to
+genuinely saturate the level:
 
-| Configuration | Errors | Total tokens | Mean latency |
-|---|---:|---:|---:|
-| retries off (`retry_attempts=1`) | 0 | 30,579 | 6,952 ms |
-| retries on (`retry_attempts=5`) | 0 | 31,472 | 6,655 ms |
+| Configuration | Requests | Errors | Total tokens | Mean latency |
+|---|---:|---:|---:|---:|
+| retries off (`retry_attempts=1`) | 156 | 0 | 141,015 | 8,822 ms |
+| retries on (`retry_attempts=5`) | 156 | 0 | 137,636 | 8,652 ms |
 
 **Still could not observe retry amplification, because nothing errored —
-even 3× past the original ceiling.** The token/latency difference between
-the two rows is ordinary run-to-run variance, not evidence either way about
-retry cost.
+even at a genuinely saturated 150, past the original ceiling.** The
+token/latency difference between the two rows is ordinary run-to-run
+variance, not evidence either way about retry cost.
 
 At the time this ran, that read as an open, unresolved question. The
 escalation section below (run afterward, same day) resolves *why* it's
@@ -404,8 +448,10 @@ more informative than a clean answer would have been:**
    origin.
 2. **But process b hit our first-ever real HTTP error in this entire
    project.** Every single-process test we ran — including the escalation
-   to 2,000 concurrent — produced zero errors across roughly 9,000
-   requests. The moment three independent processes pushed *combined*
+   to 2,000 concurrent — produced zero errors across **8,792 requests**
+   (every experiment except the multi-process runs: thinking-budget sweep,
+   output variance, concurrency sweep, retry amplification, burst test,
+   escalation). The moment three independent processes pushed *combined*
    demand past what any one of them had individually reached, we got one
    `429 rate_limited`. That's a real, if singular, signal that a genuine
    shared server-side (or regional) rate limit does exist and can trigger
@@ -439,8 +485,8 @@ latency question — see "What we'd want before production."
 
 Per `PLAN.md`'s experiment tiering, burst testing, cost modeling, and
 pushing concurrency past 150 (all originally listed here as not-yet-run)
-were completed across the 2026-08-17 follow-up passes — see above. What's
-still not run:
+were completed across the 2026-08-17 through 2026-08-19 follow-up passes —
+see above. What's still not run:
 
 - **Sustained soak** (extended-duration *moderate* concurrency, to catch
   slow leaks or rate-limit-window resets a short burst wouldn't show — a
@@ -472,12 +518,18 @@ This is a stated scope cut, not a silent one.
   failure mode under load is queueing delay, not errors (see "Escalation
   past 150"). "Sane defaults" is confirmed; "validated under real pressure"
   needs a different kind of test than retry-attempts-on-vs-off.
-- **`parallelism()` empirically derived, not asserted** — this worked exactly
-  as planned, twice: `Together`'s bare `100` has no stated basis;
-  `GeminiVertex`'s value moved from a placeholder (10) to a measured 50 to a
-  measured 150 as the sweep's own range grew, and the code comment traces
-  that history rather than presenting the current number as if it always
-  looked this way.
+- **`parallelism()` empirically derived, not asserted — including the part
+  where a "measurement" turned out to be wrong and got corrected.**
+  `Together`'s bare `100` has no stated basis; `GeminiVertex`'s value moved
+  from a placeholder (10) to a measured 50 to a **150 that was never
+  actually measured** (a fixed-repeats bug meant the sweep silently
+  re-tested ~36 real concurrent requests at every labeled level above 25)
+  to a genuinely measured **100**, once an external review caught the bug
+  and the sweep was rerun correctly. The code comment traces that whole
+  history, including the wrong intermediate value, rather than presenting
+  the current number as if it always looked this way — which is arguably
+  a better demonstration of "measured, not asserted" than getting it right
+  the first time would have been.
 - **`output_tokens` meaning something different per provider (visible+
   thinking for Gemini, visible-only for Together) turned out to be a real
   footgun, not just a documented tradeoff.** An audit of the first pass
@@ -511,15 +563,17 @@ This is a stated scope cut, not a silent one.
   ideally including Provisioned Throughput as a comparison point, since
   Google's paid guaranteed-capacity option should behave differently from
   the shared DSQ pool if the limit really is DSQ-side.
-- **`parallelism()`'s 150 default reconsidered in light of the above**: 150
-  is still the highest level we confirmed flat, but the code comment should
-  say plainly that concurrency in the 250+ range doesn't fail, it queues —
-  a caller relying on `parallelism()` as "the safe number" should know
-  what's actually on the other side of it now, not just that we stopped
-  measuring there.
+- **Done, not just flagged: `parallelism()`'s default was lowered to 100.**
+  Originally flagged here as "150 should be reconsidered"; by the time the
+  concurrency-sweep bug above got fixed and rerun, 150 turned out to no
+  longer be defensible as the default at all — it's the first level that
+  shows a real step up (p50 ~9,400ms vs. ~6,100ms at 100), not the safe
+  flat ceiling the buggy data implied. 100 is now the value, and the code
+  comment traces the full 10 → 50 → 150 (bugged) → 100 history rather than
+  presenting the current number as if it always looked this way.
 - **A latency-aware (not just error-aware) production guard.** A caller
   with a fixed timeout, calling at high concurrency, will see a wall of
-  client-side *timeouts* (not 429s) once past ~150-250 concurrent — and
+  client-side *timeouts* (not 429s) once past ~100-250 concurrent — and
   per the now-confirmed finding below, the SDK will not retry those on its
   own. Evertune needs its own timeout/backpressure handling in front of
   this provider if it wants that behavior; it isn't coming from the SDK's

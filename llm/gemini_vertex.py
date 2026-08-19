@@ -24,22 +24,33 @@ from .llm import LLM
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_LOCATION = "us-central1"
 
-# Measured, not asserted (PLAN.md's Phase 2 commitment): the concurrency
-# sweep against evertune-tests/us-central1 (see FINDINGS.md) found flat
-# latency and zero errors at every level up to 150. IMPORTANT — this is the
-# top of the *flat* zone, not evidence the system is unbounded above it:
-# a further escalation (same FINDINGS.md, "Escalation past 150") pushed to
+# Measured, not asserted (PLAN.md's Phase 2 commitment) — and this value's
+# own history is a real example of why that discipline matters:
+#   10 (placeholder, never measured)
+#   -> 50 (first real sweep, n=12/level — too noisy to trust)
+#   -> 150 (repeated-pass sweep — but a bug meant every level above 25 was
+#      silently testing the same ~36 real concurrent requests; "150" was
+#      never actually reached)
+#   -> 100 (2026-08-19, after an external review caught that bug and the
+#      sweep was rerun with genuinely saturated concurrency at every
+#      level — see FINDINGS.md's "Concurrency sweep"). 100 is the last
+#      level that's still flat (p50 ~6,100ms); 150 itself showed a real,
+#      if modest, step up (p50 ~9,400ms) — not a cliff, nowhere near the
+#      escalation's climbing zone (12,000ms+ at 250), but a genuine signal
+#      the flat zone doesn't extend all the way to 150 like the old
+#      (buggy) data implied.
+# A further escalation (FINDINGS.md's "Escalation past 150") pushed to
 # 2,000 concurrent and found latency grows almost perfectly linearly above
-# ~150-250 (p50 42, then it queues rather than erroring — 87s p50 at 2,000
-# concurrent, still zero HTTP errors). So going meaningfully above this
-# default won't throw exceptions, but it will get slow in direct proportion
-# to how far over ~150-250 you push it; that escalation data also hasn't
-# been confirmed as a real Vertex-side limit vs. a single-test-process
-# artifact (see the caveat in FINDINGS.md) — don't treat the implied
-# ~1,400 req/min figure as load-bearing without re-verifying it. Override
-# via `concurrency=` if a different project/model/region needs its own
+# ~100-250 — it queues rather than erroring, 87s p50 at 2,000 concurrent,
+# still zero HTTP errors. So going meaningfully above this default won't
+# throw exceptions, but it will get slower the further past ~100-250 you
+# push it; that escalation data also hasn't been confirmed as a real
+# Vertex-side limit vs. a single-test-process artifact (see the caveat in
+# FINDINGS.md) — don't treat the implied ~1,400 req/min figure as
+# load-bearing without re-verifying it. Override via `concurrency=` if a
+# different project/model/region needs its own
 # sweep.
-DEFAULT_CONCURRENCY = 150
+DEFAULT_CONCURRENCY = 100
 
 # The SDK defaults to zero retries unless HttpRetryOptions is supplied
 # (verified in google/genai/_api_client.py). This is that supply step; the
@@ -48,6 +59,19 @@ DEFAULT_CONCURRENCY = 150
 # the SDK's own defaults, which are sane and shouldn't be reinvented without
 # a concrete reason from the load test.
 DEFAULT_RETRY_ATTEMPTS = 5
+
+
+def _env_int(name: str, default):
+    """os.getenv(name, default) is not enough on its own: it only falls
+    back to `default` when the var is entirely unset, not when it's set to
+    an empty string (`FOO=` in a shell/CI config is a real, easy way to end
+    up there) — which would otherwise crash `int("")` with a confusing
+    ValueError far from the actual misconfiguration. Treat unset AND empty
+    the same way: fall back to `default`."""
+    value = os.getenv(name)
+    if not value:
+        return default
+    return int(value)
 
 
 class GeminiVertex(LLM):
@@ -123,19 +147,18 @@ class GeminiVertex(LLM):
         self.__concurrency = (
             concurrency
             if concurrency is not None
-            else int(os.getenv("GEMINI_CONCURRENCY", DEFAULT_CONCURRENCY))
+            else _env_int("GEMINI_CONCURRENCY", DEFAULT_CONCURRENCY)
         )
-        env_thinking_budget = os.getenv("GEMINI_THINKING_BUDGET")
         self.__thinking_budget = (
             thinking_budget
             if thinking_budget is not None
-            else (int(env_thinking_budget) if env_thinking_budget is not None else None)
+            else _env_int("GEMINI_THINKING_BUDGET", None)
         )
         self.__max_output_tokens = max_output_tokens
         self.__retry_attempts = (
             retry_attempts
             if retry_attempts is not None
-            else int(os.getenv("GEMINI_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS))
+            else _env_int("GEMINI_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS)
         )
 
         if client is not None:

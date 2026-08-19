@@ -223,7 +223,7 @@ footer a { color: var(--text-muted); }
     <h3>4. Under heavy load, it doesn't break &mdash; it just gets slow, with no warning</h3>
     <p>We simulated up to 2,000 people using it at the exact same moment &mdash; far beyond anything needed day to day. Not one request ever failed. But past a certain point, every response started taking noticeably longer, and that slowdown grew the more we pushed it.</p>
     <figure class="diagram" style="margin: 16px 0 16px;">
-      <svg viewBox="0 0 700 290" role="img" aria-label="Chart showing response time versus number of simultaneous users. Response time stays flat around 6 to 8 seconds up to 150 simultaneous users, then climbs steadily, reaching 87 seconds at 2000 simultaneous users, with zero failures throughout.">
+      <svg viewBox="0 0 700 290" role="img" aria-label="Chart showing response time versus number of simultaneous users. Response time stays flat around 6 seconds up to 100 simultaneous users, takes a modest step up at 150, then climbs steadily beyond that, reaching 87 seconds at 2,000 simultaneous users, with zero failures throughout.">
         <line x1="60" y1="240" x2="660" y2="240" stroke="var(--border-strong)"/>
         <line x1="60" y1="20" x2="60" y2="240" stroke="var(--border-strong)"/>
         <g stroke="var(--border)"><line x1="60" y1="166.7" x2="660" y2="166.7"/><line x1="60" y1="93.3" x2="660" y2="93.3"/></g>
@@ -233,20 +233,20 @@ footer a { color: var(--text-muted); }
         <text x="20" y="130" font-size="11" fill="var(--text-faint)" transform="rotate(-90 20 130)" text-anchor="middle">Response time</text>
         <text x="360" y="270" text-anchor="middle" font-size="11" fill="var(--text-faint)">Number of people using it at the same moment &rarr;</text>
         <g font-size="10.5" fill="var(--text-faint)" text-anchor="middle">
-          <text x="60" y="256">1</text><text x="455" y="256">150</text><text x="660" y="256">2,000</text>
+          <text x="60" y="256">1</text><text x="423" y="256">100</text><text x="660" y="256">2,000</text>
         </g>
-        <rect x="60" y="20" width="395" height="220" fill="var(--blue-soft)" opacity="0.4"/>
-        <rect x="455" y="20" width="205" height="220" fill="var(--amber-soft)" opacity="0.5"/>
-        <text x="257" y="40" text-anchor="middle" font-size="11" fill="var(--blue-ink)">flat &mdash; zero failures</text>
-        <text x="557" y="40" text-anchor="middle" font-size="11" fill="var(--amber-ink)">climbing &mdash; still zero failures</text>
-        <polyline points="60,224.9 455.5,222.5 495.9,210.5 564.9,181.9 619.6,124.5 660,26.3" fill="none" stroke="var(--blue)" stroke-width="2.6" stroke-linejoin="round"/>
-        <g fill="var(--blue)"><circle cx="60" cy="224.9" r="3"/><circle cx="455.5" cy="222.5" r="3"/></g>
-        <g fill="var(--amber)"><circle cx="495.9" cy="210.5" r="3.2"/><circle cx="564.9" cy="181.9" r="3.2"/><circle cx="619.6" cy="124.5" r="3.2"/><circle cx="660" cy="26.3" r="3.6"/></g>
+        <rect x="60" y="20" width="363.5" height="220" fill="var(--blue-soft)" opacity="0.4"/>
+        <rect x="423.5" y="20" width="236.5" height="220" fill="var(--amber-soft)" opacity="0.5"/>
+        <text x="241.75" y="40" text-anchor="middle" font-size="11" fill="var(--blue-ink)">flat &mdash; zero failures</text>
+        <text x="541.75" y="40" text-anchor="middle" font-size="11" fill="var(--amber-ink)">climbing &mdash; still zero failures</text>
+        <polyline points="60,226.3 368.8,225.5 423.5,225.2 455.4,217.1 495.9,210.5 564.9,182.0 619.6,124.5 660,26.3" fill="none" stroke="var(--blue)" stroke-width="2.6" stroke-linejoin="round"/>
+        <g fill="var(--blue)"><circle cx="60" cy="226.3" r="3"/><circle cx="368.8" cy="225.5" r="3"/><circle cx="423.5" cy="225.2" r="3"/></g>
+        <g fill="var(--amber)"><circle cx="455.4" cy="217.1" r="3.2"/><circle cx="495.9" cy="210.5" r="3.2"/><circle cx="564.9" cy="182.0" r="3.2"/><circle cx="619.6" cy="124.5" r="3.2"/><circle cx="660" cy="26.3" r="3.6"/></g>
         <text x="660" y="18" text-anchor="end" font-size="11.5" font-weight="700" fill="var(--text)">87 seconds</text>
       </svg>
     </figure>
     <div class="stat-big"><span class="n">0</span><span class="l">failed requests,<br>1 to 2,000 at once</span></div>
-    <p>We also confirmed this repeats: three completely separate, simultaneous test runs found the same pattern independently, and one of them hit our first-ever error in this entire project &mdash; evidence a real capacity limit does exist somewhere above normal usage.</p>
+    <p>We also tested this from three completely separate, simultaneous processes at once, to rule out that the slowdown was just an artifact of our one test setup. The result was mixed, not a clean confirmation either way: each of the three saw roughly the speed you'd expect for <em>its own</em> smaller share of the load, not the full combined slowdown &mdash; but one of them also hit our first-ever error in this entire project. That's evidence a real capacity limit exists somewhere above normal usage; it's not full proof the exact number above is precise.</p>
     <div class="impact"><b>What this means for Evertune:</b> a monitoring approach that only watches for errors would never notice this system straining &mdash; it degrades silently. Response speed needs to be watched directly as usage grows, not just whether requests succeed.</div>
   </div>
 </section>

@@ -17,6 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from loadtest.runner import percentile
+from loadtest.workload import WORKLOAD
 
 RESULTS_DIR = Path("loadtest/results")
 CHARTS_DIR = RESULTS_DIR / "charts"
@@ -187,7 +188,10 @@ def analyze_output_variance():
     for r in records:
         by_temp[r["temperature"]].append(r)
 
-    candidate_brands = ("Nike", "Brooks", "Hoka", "Asics", "New Balance", "Saucony", "Adidas")
+    # WORKLOAD[0] is the running-shoes item output_variance.py fixes as ITEM
+    # — reuse its candidate_brands rather than re-typing the list, so the
+    # two can never silently drift apart.
+    candidate_brands = WORKLOAD[0].candidate_brands
 
     print("\n=== output_variance ===")
     temps = sorted(by_temp)
@@ -354,14 +358,20 @@ def analyze_burst_test():
     """Splits burst_test.jsonl into cycles by record order (see
     experiments/burst_test.py's module docstring for why there's no
     explicit cycle field: asyncio.gather preserves task order, and each
-    cycle writes exactly CHUNK_SIZE records before the next cycle starts)."""
+    cycle writes exactly the same number of records before the next cycle
+    starts). Chunk size is derived from CYCLES (a fixed, known constant)
+    rather than hardcoding workload-length*repeats — repeats is now
+    computed dynamically in burst_test.py from the spike level, so a
+    hardcoded chunk size would silently go stale."""
     records = load("burst_test")
     if not records:
         return
 
-    workload_len = 12  # len(loadtest.workload.WORKLOAD) — kept in sync manually,
-    repeats = 3         # matching experiments/burst_test.py's REPEATS constant
-    chunk = workload_len * repeats
+    CYCLES = 2  # matches experiments/burst_test.py's CYCLES constant
+    if len(records) % CYCLES != 0:
+        print(f"  WARNING: {len(records)} records not evenly divisible by "
+              f"{CYCLES} cycles — cycle split below may be wrong")
+    chunk = len(records) // CYCLES
 
     print("\n=== burst_test ===")
     for i in range(0, len(records), chunk):
